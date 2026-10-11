@@ -1,0 +1,40 @@
+# --- core / API (Step 12) ---
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.7
+pydantic-settings>=2.3
+httpx>=0.27
+python-dotenv>=1.0
+sse-starlette>=2.1
+prometheus-client>=0.20
+# --- LLM gateway (Step 1) ---
+google-genai>=1.0        # NEW Gemini SDK ("from google import genai"); replaces google-generativeai
+openai>=1.40             # used only through Gemini's OpenAI-compatible endpoint
+# --- embeddings (Step 2) ---
+numpy>=1.26
+sentence-transformers>=3.0
+# --- vector DB (Step 3) ---
+qdrant-client>=1.10
+# --- ingestion (Step 4) ---
+pypdf>=4.0
+beautifulsoup4>=4.12
+lxml>=5.0
+# --- RAG / LCEL (Steps 5-6) ---
+langchain-core>=0.3
+rank-bm25>=0.2.2
+# --- memory (Step 7) ---
+redis>=5.0
+# --- agents (Steps 8-9) ---
+wikipedia>=1.4
+crewai>=0.100
+# --- evaluation (Step 10) ---
+ragas>=0.2
+datasets>=2.20
+# --- observability (Step 11) ---
+langfuse>=3.0
+# --- dev ---
+pytest>=8.0
+pytest-asyncio>=0.23
+fakeredis>=2.23
+locust>=2.29
+python-docx>=1.1

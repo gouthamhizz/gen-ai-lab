@@ -1,0 +1,177 @@
+# Full local stack for the 12-step platform (Windows: run from WSL2 for volume-mount performance).
+#
+#   docker compose --profile core up -d --build      # api + qdrant + redis + ollama            (fastest start)
+#   docker compose --profile full up -d --build       # + langfuse + prometheus + grafana         (everything)
+#
+# First run only: pull the model into the Ollama container (or point OLLAMA_HOST at Ollama already
+# running on the Windows host / WSL, which is what "already downloaded" almost certainly means):
+#   docker compose exec ollama ollama pull llama3.1:8b
+#
+# GPU on Windows/WSL2: install the NVIDIA CUDA driver for WSL, then uncomment the `deploy:` block below.
+
+x-app-env: &app-env
+  LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+  LLM_FALLBACK_PROVIDER: ${LLM_FALLBACK_PROVIDER:-gemini}
+  OLLAMA_HOST: http://host.docker.internal:11434
+  OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
+  GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+  GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.6-flash}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai/}
+  OPENAI_MODEL: ${OPENAI_MODEL:-gemini-3.8-flash}
+  EMBEDDING_BACKEND: ${EMBEDDING_BACKEND:-local}
+  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
+  QDRANT_URL: http://qdrant:6333
+  QDRANT_COLLECTION: ${QDRANT_COLLECTION:-docs}
+  REDIS_URL: redis://redis:6379/0
+  LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+  LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+  LANGFUSE_HOST: http://langfuse-web:3000
+  API_KEYS: ${API_KEYS:-dev-key-change-me}
+  PROMETHEUS_MULTIPROC_DIR: /tmp/prom
+
+networks:
+  genai-net:
+
+volumes:
+  ollama_data:
+  qdrant_data:
+  redis_data:
+  grafana_data:
+  langfuse_pg_data:
+  langfuse_ch_data:
+  langfuse_minio_data:
+
+services:
+  # ---------------------------------------------------------------- Step 12: the API itself
+  api:
+    build: .
+    profiles: ["core", "full"]
+    ports: ["8000:8000"]
+    environment:
+      <<: *app-env
+      API_WORKERS: ${API_WORKERS:-4}
+    volumes:
+      - ./data:/app/data
+      - ./artifacts:/app/artifacts
+      - /tmp/prom_api:/tmp/prom
+    depends_on: [qdrant, redis]
+    networks: [genai-net]
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------- Step 1: local LLM
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["core", "full"]
+    ports: ["11434:11434"]
+    volumes: [ollama_data:/root/.ollama]
+    networks: [genai-net]
+    restart: unless-stopped
+    # deploy:                       # uncomment for NVIDIA GPU under WSL2
+    #   resources:
+    #     reservations:
+    #       devices: [{driver: nvidia, count: 1, capabilities: [gpu]}]
+
+  # ---------------------------------------------------------------- Step 3: vector DB
+  qdrant:
+    image: qdrant/qdrant:latest
+    profiles: ["core", "full"]
+    ports: ["6333:6333", "6334:6334"]
+    volumes: [qdrant_data:/qdrant/storage]
+    networks: [genai-net]
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------- Step 7: conversational memory
+  redis:
+    image: redis:7-alpine
+    profiles: ["core", "full"]
+    ports: ["6380:6379"]   # host 6380 -> avoids clashing with a Redis already on the Windows host
+    volumes: [redis_data:/data]
+    networks: [genai-net]
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1"]
+
+  # ---------------------------------------------------------------- Step 11: tracing (Langfuse v3, self-hosted)
+  langfuse-worker:
+    image: docker.langfuse.com/langfuse/langfuse-worker:3
+    profiles: ["full"]
+    environment: &langfuse-env
+      DATABASE_URL: postgresql://postgres:postgres@langfuse-postgres:5432/postgres
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      REDIS_CONNECTION_STRING: redis://langfuse-redis:6379
+      NEXTAUTH_SECRET: change-me-in-production
+      SALT: change-me-in-production
+      ENCRYPTION_KEY: 0000000000000000000000000000000000000000000000000000000000000000
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+    depends_on: [langfuse-postgres, langfuse-clickhouse, langfuse-redis, langfuse-minio]
+    networks: [genai-net]
+    restart: unless-stopped
+
+  langfuse-web:
+    image: docker.langfuse.com/langfuse/langfuse:3
+    profiles: ["full"]
+    ports: ["3000:3000"]
+    environment: *langfuse-env
+    depends_on: [langfuse-worker]
+    networks: [genai-net]
+    restart: unless-stopped
+
+  langfuse-postgres:
+    image: postgres:17
+    profiles: ["full"]
+    environment: {POSTGRES_USER: postgres, POSTGRES_PASSWORD: postgres, POSTGRES_DB: postgres}
+    volumes: [langfuse_pg_data:/var/lib/postgresql/data]
+    networks: [genai-net]
+    restart: unless-stopped
+
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:24
+    profiles: ["full"]
+    environment: {CLICKHOUSE_USER: default, CLICKHOUSE_PASSWORD: clickhouse}
+    volumes: [langfuse_ch_data:/var/lib/clickhouse]
+    networks: [genai-net]
+    restart: unless-stopped
+
+  langfuse-minio:
+    image: minio/minio
+    profiles: ["full"]
+    command: server /data
+    environment: {MINIO_ROOT_USER: minio, MINIO_ROOT_PASSWORD: miniosecret}
+    volumes: [langfuse_minio_data:/data]
+    networks: [genai-net]
+    restart: unless-stopped
+
+  langfuse-redis:
+    image: redis:7-alpine
+    profiles: ["full"]
+    networks: [genai-net]
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------- Step 11: metrics + dashboards
+  prometheus:
+    image: prom/prometheus:latest
+    profiles: ["full"]
+    ports: ["9090:9090"]
+    volumes: ["./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+    networks: [genai-net]
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    profiles: ["full"]
+    ports: ["3001:3000"]   # host 3001 -> Langfuse already owns host 3000
+    environment: {GF_SECURITY_ADMIN_PASSWORD: admin}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on: [prometheus]
+    networks: [genai-net]
+    restart: unless-stopped
